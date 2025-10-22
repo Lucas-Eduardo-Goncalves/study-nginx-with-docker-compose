@@ -1,0 +1,94 @@
+# Este arquivo configura o nginx como load balancer para a aplicação arkyn-logs
+# Distribui requisições entre dois backends: app1:8080 e app2:8080
+
+# Define um grupo de servidores backend para load balancing
+upstream app_backends {
+  # Backend 1: Primeira instância da aplicação
+  server app1:8080 max_fails=3 fail_timeout=10s;
+  
+  # Backend 2: Segunda instância da aplicação  
+  server app2:8080 max_fails=3 fail_timeout=10s;
+  
+  # max_fails=3: Máximo de 3 tentativas falhadas antes de marcar como indisponível
+  # fail_timeout=10s: Tempo que fica marcado como indisponível (10 segundos)
+}
+
+# Configuração do servidor nginx que atua como load balancer
+server {
+  # Escuta na porta 80 (HTTP padrão)
+  listen 80;
+  
+  # Aceita qualquer hostname (wildcard)
+  server_name _;
+
+  # Configuração de logs
+  # Log de todas as requisições
+  access_log /var/log/nginx/balancer.access.log;  
+  # Log de erros (nível warn+)
+  error_log  /var/log/nginx/balancer.error.log warn;  
+
+  # Endpoint para verificar se o próprio nginx está funcionando
+  location /nginx-health {
+    # Não loga requisições de health check (economiza espaço)
+    access_log off;  
+    # Retorna sempre status 200 com texto "healthy"
+    return 200 "healthy\n";  
+    # Define tipo do conteúdo como texto
+    add_header Content-Type text/plain;  
+  }
+
+  # Endpoint para verificar se os backends estão saudáveis
+  location /health-check {
+    # Encaminha requisição para o endpoint /health-check dos backends
+    proxy_pass http://app_backends/health-check;
+    
+    # Headers necessários para manter contexto da requisição original
+    proxy_set_header Host $host;  # Hostname original
+    proxy_set_header X-Real-IP $remote_addr;  # IP real do cliente
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  # Cadeia de IPs
+    proxy_set_header X-Forwarded-Proto $scheme;  # Protocolo original (http/https)
+
+    # Timeouts otimizados para health checks (mais agressivos)
+    proxy_connect_timeout 5s;   # Tempo para conectar ao backend
+    proxy_send_timeout    10s;  # Tempo para enviar dados ao backend
+    proxy_read_timeout    10s;  # Tempo para receber resposta do backend
+
+    # Configuração de failover - quando tentar o próximo backend
+    proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+    
+    # Headers de resposta para debugging
+    add_header X-Health-Check "true";  # Identifica que é um health check
+    add_header X-Upstream-Addr $upstream_addr;  # Mostra qual backend respondeu
+  }
+
+  # Todas as outras requisições são balanceadas entre os backends
+  location / {
+    # Distribui requisições entre os backends do grupo app_backends
+    proxy_pass http://app_backends;
+    
+    # Headers necessários para manter contexto da requisição original
+    # Hostname original
+    proxy_set_header Host $host;  
+    # IP real do cliente  
+    proxy_set_header X-Real-IP $remote_addr;  
+    # Cadeia de IPs
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  
+    # Protocolo original (http/https)
+    proxy_set_header X-Forwarded-Proto $scheme;  
+
+    # Timeouts para operações normais (mais generosos que health checks)
+    # Tempo para conectar ao backend
+    proxy_connect_timeout 5s;   
+    # Tempo para enviar dados ao backend (mais generoso)
+    proxy_send_timeout    30s;  
+    # Tempo para receber resposta do backend (mais generoso)
+    proxy_read_timeout    30s;  
+
+    # Configuração de failover - quando tentar o próximo backend
+    # Inclui 'invalid_header' além dos códigos de erro
+    proxy_next_upstream error timeout invalid_header http_500 http_502 http_503 http_504;
+
+    # Header de resposta para debugging - mostra qual backend processou a requisição
+    add_header X-Upstream-Addr $upstream_addr;
+  }
+}
